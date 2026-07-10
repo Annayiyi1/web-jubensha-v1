@@ -994,30 +994,49 @@
         let cloudDB = null;
         let carpoolTable = null;
         let cloudSyncStatus = 'disconnected'; // connected, syncing, error, disconnected
+        let useLocalStorage = false; // 是否降级到本地存储
 
-        try {
-            const ENV_ID = "gerenhobby-jubensha-d3bj466b33a3";
-            const app = cloudbase.init({ env: ENV_ID });
-            const auth = app.auth();
-            cloudDB = app.database();
-            carpoolTable = cloudDB.collection("carpool");
-
-            // 自动登录云数据库
-            auth.signInAnonymously().then(() => {
-                cloudSyncStatus = 'connected';
-                console.log('✅ 云数据库连接成功');
-                updateCloudSyncStatus();
-                // 启动自动同步
-                startCloudSync();
-            }).catch(err => {
+        // 等待页面加载完成后初始化云数据库
+        function initCloudDatabase() {
+            // 检查腾讯云SDK是否加载
+            if (typeof cloudbase === 'undefined') {
+                console.error('❌ 腾讯云SDK未加载');
                 cloudSyncStatus = 'error';
-                console.error('❌ 云数据库连接失败:', err);
+                useLocalStorage = true;
                 updateCloudSyncStatus();
-            });
-        } catch (err) {
-            cloudSyncStatus = 'error';
-            console.error('❌ 腾讯云SDK加载失败:', err);
-            updateCloudSyncStatus();
+                return;
+            }
+
+            try {
+                const ENV_ID = "gerenhobby-jubensha-d3bj466b33a3";
+                const app = cloudbase.init({ env: ENV_ID });
+                const auth = app.auth();
+                cloudDB = app.database();
+                carpoolTable = cloudDB.collection("carpool");
+
+                console.log('🔄 正在连接云数据库...');
+
+                // 自动登录云数据库
+                auth.signInAnonymously().then(() => {
+                    cloudSyncStatus = 'connected';
+                    console.log('✅ 云数据库连接成功');
+                    updateCloudSyncStatus();
+                    // 启动自动同步
+                    startCloudSync();
+                }).catch(err => {
+                    console.error('❌ 云数据库认证失败:', err);
+                    cloudSyncStatus = 'error';
+                    useLocalStorage = true;
+                    updateCloudSyncStatus();
+                    showToast('云同步失败，使用本地存储', 'error');
+                });
+            } catch (err) {
+                console.error('❌ 腾讯云SDK初始化失败:', err);
+                cloudSyncStatus = 'error';
+                useLocalStorage = true;
+                updateCloudSyncStatus();
+                showToast('云同步初始化失败', 'error');
+            }
         }
 
         // ==================== 数据存储 ====================
@@ -1068,14 +1087,20 @@
         }
 
         async function loadCloudCarpoolData() {
-            if (!carpoolTable || cloudSyncStatus !== 'connected') return;
+            if (useLocalStorage || !carpoolTable) {
+                console.log('使用本地存储模式');
+                return;
+            }
 
             try {
                 cloudSyncStatus = 'syncing';
                 updateCloudSyncStatus();
 
-                const res = await carpoolTable.orderBy("createTime", "desc").get();
+                console.log('🔄 从云端拉取数据...');
+                const res = await carpoolTable.orderBy("createTime", "desc").limit(100).get();
                 const cloudData = res.data || [];
+
+                console.log(`📥 从云端获取 ${cloudData.length} 条数据`);
 
                 // 将云端数据转换为本地格式
                 const localCarpools = cloudData.map(item => ({
@@ -1088,7 +1113,8 @@
                     subsidy: item.subsidy || '',
                     status: item.status || 'recruiting',
                     deleted: item.deleted || false,
-                    fromCloud: true
+                    fromCloud: true,
+                    cloudId: item._id // 保存云端ID
                 }));
 
                 // 合并云端和本地数据
@@ -1102,25 +1128,30 @@
                 cloudSyncStatus = 'connected';
                 updateCloudSyncStatus();
 
+                console.log(`✅ 云同步完成，总共 ${uniqueData.length} 条拼车信息`);
+
                 // 如果当前在拼车页面，刷新显示
                 if (currentModule === 'carpool') {
                     renderCarpool();
                 }
 
             } catch (err) {
-                console.error('云数据同步失败:', err);
+                console.error('❌ 云数据同步失败:', err);
                 cloudSyncStatus = 'error';
+                useLocalStorage = true;
                 updateCloudSyncStatus();
+                showToast('云同步失败，切换到本地模式', 'error');
             }
         }
 
         async function saveToCloud(carpool) {
-            if (!carpoolTable || cloudSyncStatus !== 'connected') {
-                console.log('云数据库未连接，仅保存到本地');
+            if (useLocalStorage || !carpoolTable || cloudSyncStatus !== 'connected') {
+                console.log('⚠️ 云数据库未连接，仅保存到本地');
                 return;
             }
 
             try {
+                console.log('☁️ 正在保存到云端...', carpool);
                 await carpoolTable.add({
                     date: carpool.date,
                     time: carpool.time,
@@ -1134,7 +1165,9 @@
                 });
                 console.log('✅ 数据已同步到云端');
             } catch (err) {
-                console.error('云数据保存失败:', err);
+                console.error('❌ 云数据保存失败:', err);
+                showToast('云同步保存失败', 'error');
+                // 不影响本地使用，继续执行
             }
         }
 
@@ -2862,12 +2895,18 @@
 
         // ==================== 初始化 ====================
         document.addEventListener('DOMContentLoaded', () => {
+            // 先初始化本地数据
             initData();
             updateDMSelector();
             renderDMList();
             switchModule('carpool');
             updateDateTime();
             setInterval(updateDateTime, 60000);
+
+            // 然后初始化云数据库
+            setTimeout(() => {
+                initCloudDatabase();
+            }, 1000);
         });
     </script>
 </body>
