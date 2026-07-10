@@ -2,66 +2,12 @@
 <html lang="zh-CN">
 <head>
 
-    <!-- 腾讯云数据库SDK -->
-<script src="https://static.cloudbase.net/cloudbase-js-sdk/2.11.0/cloudbase.full.js"></script>
-<script>
-// 绑定你的云环境和carpool数据表
-const ENV_ID = "gerenhobby-jubensha-d3bj466b33a3";
-const app = cloudbase.init({ env: ENV_ID });
-const auth = app.auth();
-const db = app.database();
-const carpoolTable = db.collection("carpool");
-
-// 页面加载自动登录、拉取数据、定时刷新同步
-window.onload = async function(){
-  await auth.signInAnonymously();
-  loadAllCarpoolData();
-  // 每3秒刷新一次，多端数据同步
-  setInterval(loadAllCarpoolData, 3000);
-}
-
-// 读取云端所有拼车数据
-async function loadAllCarpoolData(){
-  const res = await carpoolTable.orderBy("createTime", "desc").get();
-  const dataList = res.data;
-  const showBox = document.getElementById("dataListBox");
-  showBox.innerHTML = "";
-  dataList.forEach(item => {
-    showBox.innerHTML += `
-      <div style="border:1px solid #ccc;padding:10px;margin:8px 0;">
-        <p>发起人：${item.username}</p>
-        <p>出行路线：${item.route}</p>
-        <p>出行时间：${item.time}</p>
-      </div>
-    `
-  })
-}
-
-// 提交数据到云端数据库
-async function submitInfo(){
-  const name = document.getElementById("nickname").value.trim();
-  const route = document.getElementById("line").value.trim();
-  const time = document.getElementById("travelTime").value.trim();
-  if(!name || !route || !time){
-    alert("昵称、路线、时间全部填写完整");
-    return;
-  }
-  await carpoolTable.add({
-    username: name,
-    route: route,
-    time: time,
-    createTime: new Date()
-  })
-  alert("提交成功，所有设备自动同步");
-  document.getElementById("nickname").value = "";
-  document.getElementById("line").value = "";
-  document.getElementById("travelTime").value = "";
-}
-</script>
-
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>剧本杀门店运营管理系统 V2.0 完整版</title>
+    <title>剧本杀门店运营管理系统 V2.0 完整版 - 云同步版</title>
+
+    <!-- 腾讯云数据库SDK - 多端云同步 -->
+    <script src="https://static.cloudbase.net/cloudbase-js-sdk/2.11.0/cloudbase.full.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
     <style>
@@ -156,16 +102,6 @@ async function submitInfo(){
     </style>
 </head>
 <body class="gradient-bg min-h-screen text-white">
-    <!-- 拼车提交表单 -->
-<div style="margin:20px;">
-  <input id="nickname" placeholder="你的昵称"><br><br>
-  <input id="line" placeholder="出行路线"><br><br>
-  <input id="travelTime" placeholder="出行时间"><br><br>
-  <button onclick="submitInfo()" style="padding:6px 16px;">提交组队信息</button>
-</div>
-
-<h3>实时拼车列表（多端同步）</h3>
-<div id="dataListBox"></div>
     <div class="flex h-screen overflow-hidden">
         <!-- 侧边栏 -->
         <aside class="w-64 glass border-r border-white/10 flex flex-col">
@@ -226,6 +162,7 @@ async function submitInfo(){
                     <p id="pageSubtitle" class="text-sm text-white/60">智能识别与管理拼车信息</p>
                 </div>
                 <div class="flex items-center gap-4">
+                    <div id="cloudSyncStatus" class="text-xs text-gray-400">⚠️ 云同步未连接</div>
                     <div id="currentDateTime" class="text-sm text-white/60"></div>
                     <button onclick="showExportModal()" class="px-4 py-2 bg-gradient-to-r from-purple-600 to-pink-600 rounded-lg text-sm font-medium hover:from-purple-500 hover:to-pink-500 transition-all">
                         📤 导出
@@ -1053,6 +990,36 @@ async function submitInfo(){
     </div>
 
     <script>
+        // ==================== 腾讯云数据库初始化 - 多端云同步 ====================
+        let cloudDB = null;
+        let carpoolTable = null;
+        let cloudSyncStatus = 'disconnected'; // connected, syncing, error, disconnected
+
+        try {
+            const ENV_ID = "gerenhobby-jubensha-d3bj466b33a3";
+            const app = cloudbase.init({ env: ENV_ID });
+            const auth = app.auth();
+            cloudDB = app.database();
+            carpoolTable = cloudDB.collection("carpool");
+
+            // 自动登录云数据库
+            auth.signInAnonymously().then(() => {
+                cloudSyncStatus = 'connected';
+                console.log('✅ 云数据库连接成功');
+                updateCloudSyncStatus();
+                // 启动自动同步
+                startCloudSync();
+            }).catch(err => {
+                cloudSyncStatus = 'error';
+                console.error('❌ 云数据库连接失败:', err);
+                updateCloudSyncStatus();
+            });
+        } catch (err) {
+            cloudSyncStatus = 'error';
+            console.error('❌ 腾讯云SDK加载失败:', err);
+            updateCloudSyncStatus();
+        }
+
         // ==================== 数据存储 ====================
         const DB = {
             get: (key) => JSON.parse(localStorage.getItem(key) || '[]'),
@@ -1082,6 +1049,120 @@ async function submitInfo(){
             if (!localStorage.getItem('dms')) {
                 DB.set('dms', sampleDMs);
             }
+        }
+
+        // ==================== 云同步功能 ====================
+        let cloudSyncInterval = null;
+
+        function startCloudSync() {
+            if (!carpoolTable) return;
+
+            // 立即加载一次云端数据
+            loadCloudCarpoolData();
+
+            // 每5秒自动同步一次
+            if (cloudSyncInterval) clearInterval(cloudSyncInterval);
+            cloudSyncInterval = setInterval(() => {
+                loadCloudCarpoolData();
+            }, 5000);
+        }
+
+        async function loadCloudCarpoolData() {
+            if (!carpoolTable || cloudSyncStatus !== 'connected') return;
+
+            try {
+                cloudSyncStatus = 'syncing';
+                updateCloudSyncStatus();
+
+                const res = await carpoolTable.orderBy("createTime", "desc").get();
+                const cloudData = res.data || [];
+
+                // 将云端数据转换为本地格式
+                const localCarpools = cloudData.map(item => ({
+                    id: item.id || Date.now() + Math.random(),
+                    date: item.date || new Date(),
+                    time: item.time || '',
+                    script: item.script || item.route || '',
+                    location: item.location || '拾光剧本杀',
+                    missing: item.missing || '',
+                    subsidy: item.subsidy || '',
+                    status: item.status || 'recruiting',
+                    deleted: item.deleted || false,
+                    fromCloud: true
+                }));
+
+                // 合并云端和本地数据
+                const localData = DB.get('carpools').filter(c => !c.fromCloud);
+                const mergedData = [...localData, ...localCarpools];
+
+                // 去重（保留最新的）
+                const uniqueData = mergeCarpoolData(mergedData);
+                DB.set('carpools', uniqueData);
+
+                cloudSyncStatus = 'connected';
+                updateCloudSyncStatus();
+
+                // 如果当前在拼车页面，刷新显示
+                if (currentModule === 'carpool') {
+                    renderCarpool();
+                }
+
+            } catch (err) {
+                console.error('云数据同步失败:', err);
+                cloudSyncStatus = 'error';
+                updateCloudSyncStatus();
+            }
+        }
+
+        async function saveToCloud(carpool) {
+            if (!carpoolTable || cloudSyncStatus !== 'connected') {
+                console.log('云数据库未连接，仅保存到本地');
+                return;
+            }
+
+            try {
+                await carpoolTable.add({
+                    date: carpool.date,
+                    time: carpool.time,
+                    script: carpool.script,
+                    location: carpool.location,
+                    missing: carpool.missing,
+                    subsidy: carpool.subsidy,
+                    status: carpool.status,
+                    deleted: carpool.deleted,
+                    createTime: new Date()
+                });
+                console.log('✅ 数据已同步到云端');
+            } catch (err) {
+                console.error('云数据保存失败:', err);
+            }
+        }
+
+        function mergeCarpoolData(data) {
+            const map = new Map();
+            data.forEach(item => {
+                const key = `${item.script}_${item.date}_${item.time}`;
+                if (!map.has(key) || new Date(item.date) > new Date(map.get(key).date)) {
+                    map.set(key, item);
+                }
+            });
+            return Array.from(map.values());
+        }
+
+        function updateCloudSyncStatus() {
+            const statusEl = document.getElementById('cloudSyncStatus');
+            if (!statusEl) return;
+
+            const statusConfig = {
+                connected: { text: '☁️ 云同步正常', class: 'text-green-400' },
+                syncing: { text: '🔄 同步中...', class: 'text-yellow-400' },
+                error: { text: '❌ 云同步失败', class: 'text-red-400' },
+                disconnected: { text: '⚠️ 云同步未连接', class: 'text-gray-400' }
+            };
+
+            const config = statusConfig[cloudSyncStatus] || statusConfig.disconnected;
+            statusEl.textContent = config.text;
+            statusEl.className = `text-xs ${config.class}`;
         }
 
         // ==================== 全局状态 ====================
@@ -1493,8 +1574,12 @@ async function submitInfo(){
             if (carpool && !carpool.deleted) {
                 carpool.status = carpool.status === 'recruiting' ? 'full' : 'recruiting';
                 DB.set('carpools', carpools);
+
+                // 同步到云端
+                saveToCloud(carpool);
+
                 renderCarpool();
-                showToast(carpool.status === 'full' ? '已标记为满员' : '已恢复拼车状态');
+                showToast(carpool.status === 'full' ? '已标记为满员并云同步' : '已恢复拼车状态并云同步');
             }
         }
 
@@ -1505,8 +1590,12 @@ async function submitInfo(){
                 carpool.deleted = true;
                 carpool.deletedAt = new Date().toISOString();
                 DB.set('carpools', carpools);
+
+                // 同步到云端
+                saveToCloud(carpool);
+
                 renderCarpool();
-                showToast('已移至回收站');
+                showToast('已移至回收站并云同步');
             }
         }
 
@@ -1517,8 +1606,12 @@ async function submitInfo(){
                 carpool.deleted = false;
                 carpool.deletedAt = null;
                 DB.set('carpools', carpools);
+
+                // 同步到云端
+                saveToCloud(carpool);
+
                 renderCarpool();
-                showToast('已恢复');
+                showToast('已恢复并云同步');
             }
         }
 
@@ -1564,9 +1657,13 @@ async function submitInfo(){
                 carpool.subsidy = document.getElementById('editCarpoolSubsidy').value || '';
 
                 DB.set('carpools', carpools);
+
+                // 同步到云端
+                saveToCloud(carpool);
+
                 closeEditCarpoolModal();
                 renderCarpool();
-                showToast('修改已保存');
+                showToast('修改已保存并云同步');
             }
         }
 
@@ -1598,9 +1695,12 @@ async function submitInfo(){
             carpools.push(carpool);
             DB.set('carpools', carpools);
 
+            // 同步到云端
+            saveToCloud(carpool);
+
             closeManualCarpoolModal();
             renderCarpool();
-            showToast('拼车信息已添加');
+            showToast('拼车信息已添加并云同步');
 
             // 清空表单
             document.getElementById('manualCarpoolScript').value = '';
@@ -2714,6 +2814,10 @@ async function submitInfo(){
                 const carpools = DB.get('carpools');
                 carpools.push(...pendingData);
                 DB.set('carpools', carpools);
+
+                // 批量同步到云端
+                pendingData.forEach(carpool => saveToCloud(carpool));
+
                 document.getElementById('carpoolInput').value = '';
                 renderCarpool();
             } else if (pendingType === 'session') {
@@ -2726,7 +2830,7 @@ async function submitInfo(){
             }
 
             closePreviewModal();
-            showToast(`成功添加 ${pendingData.length} 条记录`);
+            showToast(`成功添加 ${pendingData.length} 条记录${pendingType === 'carpool' ? '并云同步' : ''}`);
         }
 
         // ==================== 工具函数 ====================
