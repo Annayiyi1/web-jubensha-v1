@@ -1,6 +1,64 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
+
+    <!-- 腾讯云数据库SDK -->
+<script src="https://static.cloudbase.net/cloudbase-js-sdk/2.11.0/cloudbase.full.js"></script>
+<script>
+// 绑定你的云环境和carpool数据表
+const ENV_ID = "gerenhobby-jubensha-d3bj466b33a3";
+const app = cloudbase.init({ env: ENV_ID });
+const auth = app.auth();
+const db = app.database();
+const carpoolTable = db.collection("carpool");
+
+// 页面加载自动登录、拉取数据、定时刷新同步
+window.onload = async function(){
+  await auth.signInAnonymously();
+  loadAllCarpoolData();
+  // 每3秒刷新一次，多端数据同步
+  setInterval(loadAllCarpoolData, 3000);
+}
+
+// 读取云端所有拼车数据
+async function loadAllCarpoolData(){
+  const res = await carpoolTable.orderBy("createTime", "desc").get();
+  const dataList = res.data;
+  const showBox = document.getElementById("dataListBox");
+  showBox.innerHTML = "";
+  dataList.forEach(item => {
+    showBox.innerHTML += `
+      <div style="border:1px solid #ccc;padding:10px;margin:8px 0;">
+        <p>发起人：${item.username}</p>
+        <p>出行路线：${item.route}</p>
+        <p>出行时间：${item.time}</p>
+      </div>
+    `
+  })
+}
+
+// 提交数据到云端数据库
+async function submitInfo(){
+  const name = document.getElementById("nickname").value.trim();
+  const route = document.getElementById("line").value.trim();
+  const time = document.getElementById("travelTime").value.trim();
+  if(!name || !route || !time){
+    alert("昵称、路线、时间全部填写完整");
+    return;
+  }
+  await carpoolTable.add({
+    username: name,
+    route: route,
+    time: time,
+    createTime: new Date()
+  })
+  alert("提交成功，所有设备自动同步");
+  document.getElementById("nickname").value = "";
+  document.getElementById("line").value = "";
+  document.getElementById("travelTime").value = "";
+}
+</script>
+
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>剧本杀门店运营管理系统 V2.0 完整版</title>
@@ -98,6 +156,16 @@
     </style>
 </head>
 <body class="gradient-bg min-h-screen text-white">
+    <!-- 拼车提交表单 -->
+<div style="margin:20px;">
+  <input id="nickname" placeholder="你的昵称"><br><br>
+  <input id="line" placeholder="出行路线"><br><br>
+  <input id="travelTime" placeholder="出行时间"><br><br>
+  <button onclick="submitInfo()" style="padding:6px 16px;">提交组队信息</button>
+</div>
+
+<h3>实时拼车列表（多端同步）</h3>
+<div id="dataListBox"></div>
     <div class="flex h-screen overflow-hidden">
         <!-- 侧边栏 -->
         <aside class="w-64 glass border-r border-white/10 flex flex-col">
